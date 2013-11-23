@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+confdir="/etc/httpd/conf/vhosts/"
+while read user domain; do
+        group=$(id -gn $user)
+        homedir=$(grep "^$user:" /etc/passwd | cut -d":" -f 6)
+        conffile=$(grep -l "^\s*ServerName\s*$domain" ${confdir}*.conf)
+        webroot=$(grep -oP "^\s*DocumentRoot\s*[\'\"]?\K[^\'\"]*" $conffile | uniq)
+        scriptroot=$(grep -oP "^\s*ScriptAlias\s*/cgi-bin/\s*[\'\"]?\K[^\'\"]*" $conffile | uniq)
+        chown -R $user:$group $homedir $scriptroot
+        chcon -R -t user_home_dir_t $homedir
+        chcon -R -t ssh_home_t $homedir/.ssh
+        chcon -R -t httpd_user_content_t $webroot
+
+        chmod 711 $homedir
+        chmod 755 $webroot
+        chcon -R -t httpd_sys_script_exec_t $scriptroot
+        find $scriptroot -regex '.*\.\(py\|pl\|sh\)' {} \; -exec chmod 755 {} \; &> /dev/null
+        #echo -e "user:$user\ngroup:$group\nhomedir:$homedir\ndomain:$domain\nconffile:$conffile\nwebroot:$webroot\nscriptroot:$scriptroot\n\n------------------------\n"
+done < /etc/httpd/conf/userdomains
+
+

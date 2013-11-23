@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+#/root/bin/new_vhost
+
+#default variables
+httpd_conf="/etc/httpd/conf/httpd.conf"
+server_root=$(grep -oP "^ServerRoot\s*[\'\"]?\K[^\'\"]*" $httpd_conf)
+include="conf/vhosts/"
+confdir=${server_root}/${include}
+minuid=$(grep -oP "min_uid=\K\d*" /etc/suphp.conf)
+mingid=$(grep -oP "min_gid=\K\d*" /etc/suphp.conf)
+ip_address="*"
+
+#make sure include line exists in httpd.conf
+grep -q "^Include\s*$include" $httpd_conf
+if [ $? != 0 ]; then
+		echo "Include $include*.conf" >> $httpd_conf
+fi
+
+usage() {
+	echo $1
+	cat << EOF
+Usage: new_vhost -u USER -d DOMAIN [options]
+
+OPTIONS:
+	-a | --alias ALIAS
+		Specify ServerAlias (use quoted space-seperated list for multiple values.)
+	-C | --print_conffile
+		Don't make any changes. Just print the directives to STDOUT.
+	-d | --domain DOMAIN
+		Specify ServerName
+	-i | --ip_address
+		Specify the VirtualHost IP address. (defaults to "*".)
+	-s | --scriptroot
+		Specify ScriptAlias (defaults to /var/www/cgi-bin/USER)
+	-S | --no-scriptroot
+		Skip Creation of cgi-bin directory
+	-t | --ssl-host
+		Create matching VirtualHost on port 443
+	-u | --user USER
+		Must be an existing system user
+	-w | --webroot
+		Specify DocumentRoot (defaults to ~USER/public_html)
+	-W | --no-webroot
+		Skip creation of public_html directory
+	-h | --help
+		Print this message and exit.
+	--awstats
+		include awstats directives
+EOF
+}
+
+#parse args
+host_alias=()
+while [ $1 ]; do
+	case $1 in
+		--awstats)
+			awstats=1
+		-a | --alias)
+			host_alias+=( $2 )
+			shift 1
+		;;
+		-u | --user)
+			user=$2
+			shift 1
+		;;
+		-d | --domain)
+			domain=$2
+			shift 1
+		;;
+		-s | --scriptroot)
+			scriptroot=$2
+			shift 1
+		;;
+		-S | --no-scriptroot)
+			no_scriptroot=1
+		;;
+		-t | --ssl-host)
+			ssl_host=1
+		;;
+		-w | --webroot)
+			webroot=$2
+			shift 1
+		;;
+		-W | --no-webroot)
+			no_webroot=1
+		;;
+		-C | --print_conffile)
+			no_scriptroot=1
+			no_webroot=1
+			conffile='/dev/fd/1'
+		;;
+		-i | --ip_address)
+			ip_address=$2
+			shift 1
+		;;
+		-h | --help)
+			usage
+			exit 0
+		;;
+		*)
+			usage "ERROR: bad parameter" >&2
+			exit 1
+		;;
+	esac
+	shift 1
+done
+
+#check that user and domain are set
+if [ -z "$user" -o -z "$domain" ]; then
+	usage "ERROR: user and domain are both required parameters." >&2
+	exit 1
+#check that domain is a sane value:
+elif [[ ! $domain =~ ^[[:alnum:].-]{1,}\.[[:alpha:]]{2,4}$ ]]; then
+	usage "ERROR: domain value is insane" >&2
+	exit 1
+elif [[ $(id $user &> /dev/null; echo $?) -ne 0 ]]; then
+	usage "ERROR: no such user" >&2
+	exit 1
+elif [[ $(id -u $user 2> /dev/null) -lt $minuid ]]; then
+	usage "ERROR: UID is smaller than min_uid" >&2
+	exit 1
+elif [[ $(id -g $user 2> /dev/null) -lt $mingid ]]; then
+	usage "ERROR: GID is smaller than min_gid" >&2
+	exit 1
+else
+	#echo "Passed all sanity checks!"
+	#exit 0
+fi
+
+#set standard vars
+group=$(id -gn $user)
+homedir=$(grep "^${user}:" /etc/passwd | cut -d':' -f 6)
+if [ -z "$webroot" ]; then webroot="${homedir}public_html/"; fi
+if [ -z "$scriptroot" ]; then scriptroot="/var/www/cgi-bin/$user"; fi
+if [ -z "$conffile" ]; then conffile="$confdir/${domain}.conf"; fi
+
+#make directories:
+if [ ! -d $webroot -a ! "$no_webroot" ]; then 
+	mkdir $webroot 
+	chown -R ${user}:${group} $webroot
+	chcon -R -t httpd_sys_content_t $webroot
+	chmod 711 $homedir
+fi
+
+if [ ! -d $scriptroot -a ! "$no_scriptroot" ]; then
+	mkdir $scriptroot
+	if [ ! $no_webroot ]; then
+		if [ -d $webroot/cgi-bin ]; then
+			find $webroot/cgi-bin/ -maxdepth 1 -exec mv {} $scriptroot +
+			rmdir $webroot/cgi-bin
+		fi
+		ln -s $scriptroot $webroot/cgi-bin
+	fi
+	chown -R ${user}:${group} $scriptroot
+	chcon -R -t httpd_sys_script_exec_t $scriptroot
+fi
+
+if [ -f $conffile ]; then
+	echo "configuration file $conffile already exists" >&2
+	exit 1
+fi
+
+cat >$conffile <<EOF
+<VirtualHost $ip_address:80>
+	ServerAdmin webmaster@$domain
+	ServerName $domain
+	ServerAlias www.$domain ${host_alias[@]}
+	DocumentRoot $webroot
+	ScriptAlias /cgi-bin/ "$scriptroot"
+	UserDir disabled
+	UserDir enabled $user
+	UserDir public_html
+	ErrorLog logs/$domain-error_log
+	CustomLog logs/$domain-access_log combined
+	#### START AWSTATS ####
+	Alias /awstats/icon/ $scriptroot/awstats/icon/
+	ScriptAlias /awstats/ $scriptroot/awstats/
+	<Directory $scriptroot/awstats/>
+		DirectoryIndex awstats.pl
+		Options ExecCGI
+		order deny,allow
+		deny from all
+		allow from 127.0.0.1 10.0.0.0/24
+	</Directory>
+	#### END AWSTATS ####
+	suPHP_Engine On
+	suPHP_PHPPath "$(which php)"
+	<Directory "$webroot">
+		suPHP_UserGroup $user $group
+		AddHandler x-httpd-php .php
+		suPHP_AddHandler x-httpd-php
+		AllowOverride All
+	</Directory>
+	SuexecUserGroup $user $group
+</VirtualHost>
+EOF
+
+if [ $ssl_host ]; then
+		cat >> $conffile <<EOF
+<VirtualHost $ip_address:443>
+	ServerAdmin webmaster@$domain
+	ServerName $domain
+	ServerAlias www.${domain} ${host_alias[@]}
+	DocumentRoot $webroot
+	ScriptAlias /cgi-bin/ "$scriptroot"
+	UserDir disabled
+	UserDir enabled $user
+	UserDir public_html
+	ErrorLog logs/$domain-ssl_error_log
+	CustomLog logs/$domain-ssl_access_log combined
+ 	SSLEngine on
+	SSLProtocol all -SSLv2
+	SSLCipherSuite ALL:!ADH:!EXPORT:!SSLv2:RC4+RSA:+HIGH:+MEDIUM:+LOW
+	SSLCertificateFile /etc/pki/tls/certs/${domain}.crt
+	SSLCertificateKeyFile /etc/pki/tls/private/${domain}.key
+	SetEnvIf User-Agent ".*MSIE.*" \
+		nokeepalive ssl-unclean-shutdown \
+		downgrade-1.0 force-response-1.0
+	CustomLog logs/ssl_request_log \
+		"%t %h %{SSL_PROTOCOL}x %{SSL_CIPHER}x \"%r\" %b"
+	suPHP_Engine On
+	suPHP_PHPPath "/usr/bin/php"
+	<Directory "$webroot">
+		suPHP_UserGroup $user $group
+		AddHandler x-httpd-php .php
+		suPHP_AddHandler x-httpd-php
+		AllowOverride All
+	</Directory>
+	SuexecUserGroup $user $group
+</VirtualHost>
+EOF
+fi
