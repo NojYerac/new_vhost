@@ -9,10 +9,12 @@ confdir=${server_root}/${include}
 minuid=$(grep -oP "min_uid=\K\d*" /etc/suphp.conf)
 mingid=$(grep -oP "min_gid=\K\d*" /etc/suphp.conf)
 ip_address="*"
+aw_skel=/etc/awstats/skel.conf
+
 
 #make sure include line exists in httpd.conf
-grep -q "^Include\s*$include" $httpd_conf
-if [ $? != 0 ]; then
+grep -q "^Include\s*$include" $httpd_conf &> /dev/null
+if [[ $? -ne 0 ]]; then
 		echo "Include $include*.conf" >> $httpd_conf
 fi
 
@@ -20,7 +22,11 @@ usage() {
 	echo $1
 	cat << EOF
 Usage: new_vhost -u USER -d DOMAIN [options]
+EOF
+}
 
+help() {
+	cat << EOF
 OPTIONS:
 	-a | --alias ALIAS
 		Specify ServerAlias (use quoted space-seperated list for multiple values.)
@@ -44,8 +50,12 @@ OPTIONS:
 		Skip creation of public_html directory
 	-h | --help
 		Print this message and exit.
-	--awstats
-		include awstats directives
+	--no-awstats
+		don't install awstats or include awstats directives
+	--no-create-awstats
+		don't install awstats
+	--no-suphp
+		don't include suphp directive
 EOF
 }
 
@@ -53,8 +63,20 @@ EOF
 host_alias=()
 while [ $1 ]; do
 	case $1 in
-		--awstats)
-			awstats=1
+		--awstatsroot)
+			awstatsroot=$2
+			shift 1
+		;;
+		--no-create-awstats)
+			no_create_awstats=1
+		;;
+		--no-awstats)
+			no_awstats=1
+			no_create_awstats=1
+		;;
+		--no-suphp)
+			no_suphp=1
+		;;
 		-a | --alias)
 			host_alias+=( $2 )
 			shift 1
@@ -84,12 +106,13 @@ while [ $1 ]; do
 		-W | --no-webroot)
 			no_webroot=1
 		;;
-		-C | --print_conffile)
+		-C | --print-conffile)
 			no_scriptroot=1
 			no_webroot=1
+			no_create_awstats=1
 			conffile='/dev/fd/1'
 		;;
-		-i | --ip_address)
+		-i | --ip-address)
 			ip_address=$2
 			shift 1
 		;;
@@ -122,6 +145,14 @@ elif [[ $(id -u $user 2> /dev/null) -lt $minuid ]]; then
 elif [[ $(id -g $user 2> /dev/null) -lt $mingid ]]; then
 	usage "ERROR: GID is smaller than min_gid" >&2
 	exit 1
+elif [[ $(rpm -q awstats &> /dev/null; echo $?) -ne 0 -a ! $no_awstats ]]; then
+	usage "ERROR: awstats not installed" >&2
+	exit 1
+elif [[ ! -f $aw_skel -a ! $no_awstats ]]; then
+	usage "ERROR: create file at /etc/awstats/skel.conf\
+	       	(incl. USER, DOMAIN & ALIAS)"
+	exit 1
+		
 else
 	#echo "Passed all sanity checks!"
 	#exit 0
@@ -133,12 +164,12 @@ homedir=$(grep "^${user}:" /etc/passwd | cut -d':' -f 6)
 if [ -z "$webroot" ]; then webroot="${homedir}public_html/"; fi
 if [ -z "$scriptroot" ]; then scriptroot="/var/www/cgi-bin/$user"; fi
 if [ -z "$conffile" ]; then conffile="$confdir/${domain}.conf"; fi
-
+if [ -z "$awstatsroot" ]; then awstatsroot="$scriptroot/awstats"
 #make directories:
 if [ ! -d $webroot -a ! "$no_webroot" ]; then 
 	mkdir $webroot 
 	chown -R ${user}:${group} $webroot
-	chcon -R -t httpd_sys_content_t $webroot
+	chcon -R -t httpd_user_content_t $webroot
 	chmod 711 $homedir
 fi
 
@@ -146,13 +177,32 @@ if [ ! -d $scriptroot -a ! "$no_scriptroot" ]; then
 	mkdir $scriptroot
 	if [ ! $no_webroot ]; then
 		if [ -d $webroot/cgi-bin ]; then
-			find $webroot/cgi-bin/ -maxdepth 1 -exec mv {} $scriptroot +
+			mv $webroot/cgi-bin/* $scriptroot
 			rmdir $webroot/cgi-bin
 		fi
 		ln -s $scriptroot $webroot/cgi-bin
 	fi
 	chown -R ${user}:${group} $scriptroot
 	chcon -R -t httpd_sys_script_exec_t $scriptroot
+fi
+
+
+
+if [ ! -d $awstatsroot -a ! "$no_create_awstats" ]; then
+	mkdir $awstatsroot
+	find /var/www/awstats/ -maxdepth 1 -regextype posix-egrep \
+		-not -regex "/var/www/awstats/|.*\.txt|.*\.bak" \
+		-exec cp -r {} $awstatsroot \;
+	sed -e "s/USER/$user/g" -e "s/DOMAIN/$domain/g" \
+		-e "s/ALIAS/${host_alias[@]}/g" $aw_skel \
+		>> $awstatsroot/awstats.${domain}.conf
+	chown -R ${user}:${group} $awstatsroot
+	chcon -R -t httpd_awstats_content_t $awstatsroot
+	find $awstatsroot -type f -perm 755 -exec \
+		chcon -t httpd_awstats_script_exec_t {} \;
+	cat >> /var/spool/cron/$user <<-EOF
+	0 */1 * * * cd $awstatsroot && ./awstats.pl -config=$domain -update &> /dev/null
+	EOF
 fi
 
 if [ -f $conffile ]; then
@@ -172,6 +222,69 @@ cat >$conffile <<EOF
 	UserDir public_html
 	ErrorLog logs/$domain-error_log
 	CustomLog logs/$domain-access_log combined
+	SuexecUserGroup $user $group
+EOF
+
+if [ ! "$no_awstats" ]; then
+	cat >> $conffile << EOF
+	#### START AWSTATS ####
+	Alias /awstats/icon/ $awstatsroot/icon/
+	ScriptAlias /awstats/ $awstatsroot/
+	<Directory $awstatsroot/>
+		DirectoryIndex awstats.pl
+		Options ExecCGI
+		order deny,allow
+		deny from all
+		allow from 127.0.0.1 10.0.0.0/24
+	</Directory>
+	#### END AWSTATS ####
+EOF
+
+if [ ! "$no_suphp" ]; then
+	cat >> $conffile << EOF
+	#### START SUPHP ####
+	suPHP_Engine On
+	suPHP_PHPPath "$(which php)"
+	<Directory "$webroot">
+		suPHP_UserGroup $user $group
+		AddHandler x-httpd-php .php
+		suPHP_AddHandler x-httpd-php
+		AllowOverride All
+	</Directory>
+	#### END SUPHP ####
+EOF
+
+echo "</VirtualHost>" >> $conffile
+
+
+if [ $ssl_host ]; then
+	cat >> $conffile <<EOF
+<VirtualHost $ip_address:443>
+	ServerAdmin webmaster@$domain
+	ServerName $domain
+	ServerAlias www.${domain} ${host_alias[@]}
+	DocumentRoot $webroot
+	ScriptAlias /cgi-bin/ "$scriptroot"
+	SuexecUserGroup $user $group
+	UserDir disabled
+	UserDir enabled $user
+	UserDir public_html
+	ErrorLog logs/$domain-ssl_error_log
+	CustomLog logs/$domain-ssl_access_log combined
+	SSLEngine on
+	SSLProtocol all -SSLv2
+	SSLCipherSuite ALL:!ADH:!EXPORT:!SSLv2:RC4+RSA:+HIGH:+MEDIUM:+LOW
+	SSLCertificateFile /etc/pki/tls/certs/${domain}.crt
+	SSLCertificateKeyFile /etc/pki/tls/private/${domain}.key
+	SetEnvIf User-Agent ".*MSIE.*" \
+		nokeepalive ssl-unclean-shutdown \
+		downgrade-1.0 force-response-1.0
+	CustomLog logs/ssl_request_log \
+		"%t %h %{SSL_PROTOCOL}x %{SSL_CIPHER}x \"%r\" %b"
+EOF
+
+	if [ ! "$no_awstats" ]; then
+		cat >> $conffile << EOF
 	#### START AWSTATS ####
 	Alias /awstats/icon/ $scriptroot/awstats/icon/
 	ScriptAlias /awstats/ $scriptroot/awstats/
@@ -183,41 +296,11 @@ cat >$conffile <<EOF
 		allow from 127.0.0.1 10.0.0.0/24
 	</Directory>
 	#### END AWSTATS ####
-	suPHP_Engine On
-	suPHP_PHPPath "$(which php)"
-	<Directory "$webroot">
-		suPHP_UserGroup $user $group
-		AddHandler x-httpd-php .php
-		suPHP_AddHandler x-httpd-php
-		AllowOverride All
-	</Directory>
-	SuexecUserGroup $user $group
-</VirtualHost>
 EOF
 
-if [ $ssl_host ]; then
-		cat >> $conffile <<EOF
-<VirtualHost $ip_address:443>
-	ServerAdmin webmaster@$domain
-	ServerName $domain
-	ServerAlias www.${domain} ${host_alias[@]}
-	DocumentRoot $webroot
-	ScriptAlias /cgi-bin/ "$scriptroot"
-	UserDir disabled
-	UserDir enabled $user
-	UserDir public_html
-	ErrorLog logs/$domain-ssl_error_log
-	CustomLog logs/$domain-ssl_access_log combined
- 	SSLEngine on
-	SSLProtocol all -SSLv2
-	SSLCipherSuite ALL:!ADH:!EXPORT:!SSLv2:RC4+RSA:+HIGH:+MEDIUM:+LOW
-	SSLCertificateFile /etc/pki/tls/certs/${domain}.crt
-	SSLCertificateKeyFile /etc/pki/tls/private/${domain}.key
-	SetEnvIf User-Agent ".*MSIE.*" \
-		nokeepalive ssl-unclean-shutdown \
-		downgrade-1.0 force-response-1.0
-	CustomLog logs/ssl_request_log \
-		"%t %h %{SSL_PROTOCOL}x %{SSL_CIPHER}x \"%r\" %b"
+	if [ ! "$no_awstats" ]; then
+		cat >> $conffile << EOF
+	#### START SUPHP ####
 	suPHP_Engine On
 	suPHP_PHPPath "/usr/bin/php"
 	<Directory "$webroot">
@@ -226,7 +309,8 @@ if [ $ssl_host ]; then
 		suPHP_AddHandler x-httpd-php
 		AllowOverride All
 	</Directory>
-	SuexecUserGroup $user $group
-</VirtualHost>
+	#### END SUPHP ####
 EOF
+	fi
+	echo "</VirtualHost>" >> $conffile
 fi
