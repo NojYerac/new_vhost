@@ -145,26 +145,28 @@ elif [[ $(id -u $user 2> /dev/null) -lt $minuid ]]; then
 elif [[ $(id -g $user 2> /dev/null) -lt $mingid ]]; then
 	usage "ERROR: GID is smaller than min_gid" >&2
 	exit 1
-elif [[ $(rpm -q awstats &> /dev/null; echo $?) -ne 0 -a ! $no_awstats ]]; then
+elif [[ $(rpm -q awstats &> /dev/null; echo $?) -ne 0 && -z "$no_awstats" ]]; then
 	usage "ERROR: awstats not installed" >&2
 	exit 1
-elif [[ ! -f $aw_skel -a ! $no_awstats ]]; then
+elif [[ ! -f $aw_skel && -z "$no_awstats" ]]; then
 	usage "ERROR: create file at /etc/awstats/skel.conf\
 	       	(incl. USER, DOMAIN & ALIAS)"
 	exit 1
-		
-else
-	#echo "Passed all sanity checks!"
-	#exit 0
+#else
+#	echo "Passed all sanity checks!"
+#	exit 0
 fi
+
+
 
 #set standard vars
 group=$(id -gn $user)
 homedir=$(grep "^${user}:" /etc/passwd | cut -d':' -f 6)
-if [ -z "$webroot" ]; then webroot="${homedir}public_html/"; fi
+if [ -z "$webroot" ]; then webroot="${homedir}/public_html/"; fi
 if [ -z "$scriptroot" ]; then scriptroot="/var/www/cgi-bin/$user"; fi
 if [ -z "$conffile" ]; then conffile="$confdir/${domain}.conf"; fi
-if [ -z "$awstatsroot" ]; then awstatsroot="$scriptroot/awstats"
+if [ -z "$awstatsroot" ]; then awstatsroot="$scriptroot/awstats"; fi
+
 #make directories:
 if [ ! -d $webroot -a ! "$no_webroot" ]; then 
 	mkdir $webroot 
@@ -239,6 +241,7 @@ if [ ! "$no_awstats" ]; then
 	</Directory>
 	#### END AWSTATS ####
 EOF
+fi
 
 if [ ! "$no_suphp" ]; then
 	cat >> $conffile << EOF
@@ -253,6 +256,7 @@ if [ ! "$no_suphp" ]; then
 	</Directory>
 	#### END SUPHP ####
 EOF
+fi
 
 echo "</VirtualHost>" >> $conffile
 
@@ -297,6 +301,7 @@ EOF
 	</Directory>
 	#### END AWSTATS ####
 EOF
+    fi
 
 	if [ ! "$no_awstats" ]; then
 		cat >> $conffile << EOF
@@ -312,5 +317,6 @@ EOF
 	#### END SUPHP ####
 EOF
 	fi
-	echo "</VirtualHost>" >> $conffile
+	
+    echo "</VirtualHost>" >> $conffile
 fi
