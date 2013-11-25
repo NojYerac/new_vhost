@@ -10,7 +10,7 @@ minuid=$(grep -oP "min_uid=\K\d*" /etc/suphp.conf)
 mingid=$(grep -oP "min_gid=\K\d*" /etc/suphp.conf)
 ip_address="*"
 aw_skel=/etc/awstats/skel.conf
-
+userdomains=/etc/httpd/conf/userdomains
 
 #make sure include line exists in httpd.conf
 grep -q "^Include\s*$include" $httpd_conf &> /dev/null
@@ -56,6 +56,8 @@ OPTIONS:
 		don't install awstats
 	--no-suphp
 		don't include suphp directive
+	--no-userdomains
+		don't add new site to userdomains
 EOF
 }
 
@@ -65,6 +67,10 @@ while [ $1 ]; do
 	case $1 in
 		--awstatsroot)
 			awstatsroot=$2
+			shift 1
+		;;
+		--no-userdomains)
+			no_userdomains=$2
 			shift 1
 		;;
 		--no-create-awstats)
@@ -110,6 +116,7 @@ while [ $1 ]; do
 			no_scriptroot=1
 			no_webroot=1
 			no_create_awstats=1
+			no_userdomains=1
 			conffile='/dev/fd/1'
 		;;
 		-i | --ip-address)
@@ -149,7 +156,7 @@ elif [[ $(rpm -q awstats &> /dev/null; echo $?) -ne 0 && -z "$no_awstats" ]]; th
 	usage "ERROR: awstats not installed" >&2
 	exit 1
 elif [[ ! -f $aw_skel && -z "$no_awstats" ]]; then
-	usage "ERROR: create file at /etc/awstats/skel.conf\
+	usage "ERROR: create file at $aw_skel\
 	       	(incl. USER, DOMAIN & ALIAS)"
 	exit 1
 #else
@@ -316,7 +323,11 @@ EOF
 	</Directory>
 	#### END SUPHP ####
 EOF
-	fi
-	
+	fi	
     echo "</VirtualHost>" >> $conffile
 fi
+
+if [ ! "$no_userdomains" -a ! "$(grep ^${user}\s $userdomains)" ]; then
+	echo "$user $domain" >> $userdomains
+fi
+
