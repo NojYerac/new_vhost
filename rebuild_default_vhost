@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+#/root/rebuild_default_vhost.sh
+
+usage() {
+	echo $1
+	cat <<EOF
+USAGE: rebuild_default_vhost.sh [-h|--help]
+EOF
+}
+
+help() {
+	cat <<EOF
+OPTIONS:
+
+-h | --help
+	Print this message.
+EOF
+}
+
+while [ $1 ]; do
+	case $1 in
+		-h | --help)
+			help
+			usage
+			exit 0
+		;;
+		-o | --outfile)
+			outfile=$2
+			shift 1
+		;;
+		*)
+			usage
+			exit 1
+		;;
+	esac
+	shift 1
+done
+
+domain=$(hostname)
+[ -z "$outfile" ] && outfile=/etc/httpd/conf/vhosts/00-$domain.conf
+tmpfile="/tmp/$(tr -dc [:alnum:] < /dev/urandom | head -c 8)"
+tmpsslfile="/tmp/$(tr -dc [:alnum:] < /dev/urandom | head -c 8)"
+
+echo "<VirtualHost *:80>" > $tmpfile
+echo "<VirtualHost *:443>" > $tmpsslfile
+
+tee -a $tmpsslfile  >> $tmpfile <<EOF
+	ServerAdmin webmaster@$domain
+	ServerName $domain
+	DocumentRoot /var/www/html
+	#### START AWSTATS ####
+	Alias /report   /var/www/awstats
+	Alias /awstats/icon/ /var/www/awstats/icon/
+	ScriptAlias /awstats/ /var/www/awstats/
+	<Directory /var/www/awstats/>
+		DirectoryIndex awstats.pl
+		Options ExecCGI
+		order deny,allow
+		deny from all
+		allow from 127.0.0.1 10.0.0.0/24
+	</Directory>
+	#### END AWSTATS ####
+	ScriptAlias /cgi-bin/ "/var/www/cgi-bin"
+	UserDir public_html
+	ErrorLog logs/error_log
+	CustomLog logs/access_log combined
+	suPHP_Engine On
+	suPHP_PHPPath "/usr/bin/php"
+EOF
+
+cat >> $tmpsslfile << EOF
+	ErrorLog logs/ssl_error_log
+	CustomLog logs/ssl_access_log combined
+	LogLevel warn
+	SSLEngine on
+	SSLProtocol all -SSLv2
+	SSLCipherSuite ALL:!ADH:!EXPORT:!SSLv2:RC4+RSA:+HIGH:+MEDIUM:+LOW
+	SSLCertificateFile /etc/pki/tls/certs/merpsirk.crt
+	SSLCertificateKeyFile /etc/pki/tls/private/merpsirk.key
+	SetEnvIf User-Agent ".*MSIE.*" \
+			 nokeepalive ssl-unclean-shutdown \
+			 downgrade-1.0 force-response-1.0
+	CustomLog logs/ssl_request_log \
+			  "%t %h %{SSL_PROTOCOL}x %{SSL_CIPHER}x \"%r\" %b"
+EOF
+
+while read user domain; do
+	group=$(id -gn $user)
+	tee -a $tmpsslfile >> $tmpfile <<EOF
+	<Directory "/home/$user/public_html/">
+		suPHP_UserGroup $user $group
+		AddHandler x-httpd-php .php
+		suPHP_AddHandler x-httpd-php
+		AllowOverride All
+	</Directory>
+EOF
+done < /etc/httpd/conf/userdomains
+
+echo "</VirtualHost>" | tee -a $tmpsslfile >> $tmpfile
+
+cat $tmpfile $tmpsslfile > $outfile
+
+rm -f $tmpfile $tmpsslfile
