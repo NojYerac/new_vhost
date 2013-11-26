@@ -195,8 +195,6 @@ if [ ! -d $scriptroot -a ! "$no_scriptroot" ]; then
 	chcon -R -t httpd_sys_script_exec_t $scriptroot
 fi
 
-
-
 if [ ! -d $awstatsroot -a ! "$no_create_awstats" ]; then
 	mkdir $awstatsroot
 	find /var/www/awstats/ -maxdepth 1 -regextype posix-egrep \
@@ -214,6 +212,8 @@ if [ ! -d $awstatsroot -a ! "$no_create_awstats" ]; then
 	EOF
 fi
 
+
+#write configuration file
 if [ -f $conffile ]; then
 	echo "configuration file $conffile already exists" >&2
 	exit 1
@@ -310,7 +310,7 @@ EOF
 EOF
     fi
 
-	if [ ! "$no_awstats" ]; then
+	if [ ! "$no_suphp" ]; then
 		cat >> $conffile << EOF
 	#### START SUPHP ####
 	suPHP_Engine On
@@ -327,7 +327,8 @@ EOF
     echo "</VirtualHost>" >> $conffile
 fi
 
-if [ ! "$no_userdomains" -a ! "$(grep ^${user}\s $userdomains)" ]; then
+#edit userdomains file!
+if [ ! "$no_userdomains" -a -f $userdomains -a ! "$(grep ^${user}\s $userdomains)" ]; then
 	echo "$user $domain" >> $userdomains
 fi
 
