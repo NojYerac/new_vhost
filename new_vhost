@@ -3,19 +3,53 @@
 
 #default variables
 httpd_conf="/etc/httpd/conf/httpd.conf"
-server_root=$(grep -oP "^ServerRoot\s*[\'\"]?\K[^\'\"]*" $httpd_conf)
-include="conf/vhosts/"
-confdir=${server_root}/${include}
-minuid=$(grep -oP "min_uid=\K\d*" /etc/suphp.conf)
-mingid=$(grep -oP "min_gid=\K\d*" /etc/suphp.conf)
-ip_address="*"
+server_root="/etc/httpd"
+include="conf/vhosts/"  #directory for vhost conf files (path from ServerRoot)
+ip_address="*"		#default ip address for all new vhosts
+#ip_address="$(ip a | grep -oP 'inet\K([\d]+\.){3}[\d]+' | tail -n+2 | head -1)"
 aw_skel=/etc/awstats/skel.conf
 userdomains=/etc/httpd/conf/userdomains
 
+#make sure httpd is installed
+if [ $(which httpd &> /dev/null; echo $?) -ne 0 ]; then
+	echo "No httpd binary." >&2
+	exit 1
+elif [ -f $httpd_conf ]; then
+	server_root=$(grep -oP "^\s*ServerRoot\s*[\'\"]?\K[^\'\"]*" $httpd_conf)
+fi
+confdir=${server_root}/${include} # abs path to $include
+
+#check for suphp & suexec
+if [ ! -u "$(which suphp)" ]; then
+	echo "WARN: suphp binary doesn't exist or isn't set UID." >&2
+	no_suphp=1
+fi
+
+if [ ! -u "$(which suexec)" ]; then
+	echo "WARN: suexec binary doesn't exist or isn't set UID." >&2
+	no_suexec=1
+fi
+
+#set minuid & mingid
+if [ -f /etc/suphp.conf ]; then
+	minuid=$(grep -oP "min_uid=\K\d*" /etc/suphp.conf)
+	mingid=$(grep -oP "min_gid=\K\d*" /etc/suphp.conf)
+else
+	minuid=1
+	mingid=1
+fi
+
+#check that awstats is installed
+if [[ $(rpm -q awstats &> /dev/null; echo $?) -ne 0 && -z "$no_awstats" ]]; then
+	echo "WARN: awstats not installed" >&2
+	no_awstats=1
+	no_create_awstats=1
+fi
+
 #make sure include line exists in httpd.conf
-grep -q "^Include\s*$include" $httpd_conf &> /dev/null
+grep -q "^\s*Include\s*$include\s*$" $httpd_conf &> /dev/null
 if [[ $? -ne 0 ]]; then
-		echo "Include $include*.conf" >> $httpd_conf
+	echo "Include $include*.conf" >> $httpd_conf
 fi
 
 usage() {
@@ -25,17 +59,17 @@ Usage: new_vhost -u USER -d DOMAIN [options]
 EOF
 }
 
-help() {
+print_help() {
 	cat << EOF
 OPTIONS:
 	-a | --alias ALIAS
-		Specify ServerAlias (use quoted space-seperated list for multiple values.)
+		Specify ServerAlias (use quoted space-seperated list for multiple values)
 	-C | --print_conffile
-		Don't make any changes. Just print the directives to STDOUT.
+		Don't make any changes, just print the directives to STDOUT
 	-d | --domain DOMAIN
 		Specify ServerName
 	-i | --ip_address
-		Specify the VirtualHost IP address. (defaults to "*".)
+		Specify the VirtualHost IP address (defaults to "*")
 	-s | --scriptroot
 		Specify ScriptAlias (defaults to /var/www/cgi-bin/USER)
 	-S | --no-scriptroot
@@ -49,11 +83,13 @@ OPTIONS:
 	-W | --no-webroot
 		Skip creation of public_html directory
 	-h | --help
-		Print this message and exit.
+		Print this message and exit
+	--awskel AWSKEL
+		Specify skeleton file for awstats
 	--no-awstats
-		don't install awstats or include awstats directives
+		Don't install awstats or include awstats directives
 	--no-create-awstats
-		don't install awstats
+		Don't install awstats
 	--no-suphp
 		don't include suphp directive
 	--no-userdomains
@@ -68,72 +104,85 @@ while [ $1 ]; do
 		--awstatsroot)
 			awstatsroot=$2
 			shift 1
-		;;
+			;;
 		--no-userdomains)
 			no_userdomains=$2
 			shift 1
-		;;
+			;;
 		--no-create-awstats)
 			no_create_awstats=1
-		;;
+			;;
+		--aw-skel)
+			aw_skel=$2
+			shift 1
+			;;
 		--no-awstats)
 			no_awstats=1
 			no_create_awstats=1
-		;;
+			;;
 		--no-suphp)
 			no_suphp=1
-		;;
+			;;
 		-a | --alias)
 			host_alias+=( $2 )
 			shift 1
-		;;
+			;;
 		-u | --user)
 			user=$2
 			shift 1
-		;;
+			;;
 		-d | --domain)
 			domain=$2
 			shift 1
-		;;
+			;;
 		-s | --scriptroot)
 			scriptroot=$2
 			shift 1
-		;;
+			;;
 		-S | --no-scriptroot)
 			no_scriptroot=1
-		;;
+			;;
 		-t | --ssl-host)
 			ssl_host=1
-		;;
+			;;
 		-w | --webroot)
 			webroot=$2
 			shift 1
-		;;
+			;;
 		-W | --no-webroot)
 			no_webroot=1
-		;;
+			;;
 		-C | --print-conffile)
 			no_scriptroot=1
 			no_webroot=1
 			no_create_awstats=1
 			no_userdomains=1
 			conffile='/dev/fd/1'
-		;;
+			;;
 		-i | --ip-address)
 			ip_address=$2
 			shift 1
-		;;
+			;;
 		-h | --help)
 			usage
+			print_help
 			exit 0
-		;;
+			;;
 		*)
 			usage "ERROR: bad parameter" >&2
 			exit 1
-		;;
+			;;
 	esac
 	shift 1
 done
+
+#set standard vars
+group=$(id -gn $user)
+homedir=$(grep "^${user}:" /etc/passwd | cut -d':' -f 6)
+if [ -z "$webroot" ]; then webroot="${homedir}/public_html/"; fi
+if [ -z "$scriptroot" ]; then scriptroot="/var/www/cgi-bin/$user"; fi
+if [ -z "$conffile" ]; then conffile="$confdir/${domain}.conf"; fi
+if [ -z "$awstatsroot" ]; then awstatsroot="$scriptroot/awstats"; fi
 
 #check that user and domain are set
 if [ -z "$user" -o -z "$domain" ]; then
@@ -143,18 +192,19 @@ if [ -z "$user" -o -z "$domain" ]; then
 elif [[ ! $domain =~ ^[[:alnum:].-]{1,}\.[[:alpha:]]{2,4}$ ]]; then
 	usage "ERROR: domain value is insane" >&2
 	exit 1
+#check that user exists
 elif [[ $(id $user &> /dev/null; echo $?) -ne 0 ]]; then
 	usage "ERROR: no such user" >&2
 	exit 1
+#check that UID > minuid
 elif [[ $(id -u $user 2> /dev/null) -lt $minuid ]]; then
 	usage "ERROR: UID is smaller than min_uid" >&2
 	exit 1
+#check that GID > mingid
 elif [[ $(id -g $user 2> /dev/null) -lt $mingid ]]; then
 	usage "ERROR: GID is smaller than min_gid" >&2
 	exit 1
-elif [[ $(rpm -q awstats &> /dev/null; echo $?) -ne 0 && -z "$no_awstats" ]]; then
-	usage "ERROR: awstats not installed" >&2
-	exit 1
+#check that awstats skel file exists
 elif [[ ! -f $aw_skel && -z "$no_awstats" ]]; then
 	usage "ERROR: create file at $aw_skel\
 	       	(incl. USER, DOMAIN & ALIAS)"
@@ -164,15 +214,6 @@ elif [[ ! -f $aw_skel && -z "$no_awstats" ]]; then
 #	exit 0
 fi
 
-
-
-#set standard vars
-group=$(id -gn $user)
-homedir=$(grep "^${user}:" /etc/passwd | cut -d':' -f 6)
-if [ -z "$webroot" ]; then webroot="${homedir}/public_html/"; fi
-if [ -z "$scriptroot" ]; then scriptroot="/var/www/cgi-bin/$user"; fi
-if [ -z "$conffile" ]; then conffile="$confdir/${domain}.conf"; fi
-if [ -z "$awstatsroot" ]; then awstatsroot="$scriptroot/awstats"; fi
 
 #make directories:
 if [ ! -d $webroot -a ! "$no_webroot" ]; then 
@@ -231,8 +272,13 @@ cat >$conffile <<EOF
 	UserDir public_html
 	ErrorLog logs/$domain-error_log
 	CustomLog logs/$domain-access_log combined
+EOF
+
+if [ ! "$no_suexec" ]; then
+	cat >> $conffile <<EOF
 	SuexecUserGroup $user $group
 EOF
+fi
 
 if [ ! "$no_awstats" ]; then
 	cat >> $conffile << EOF
@@ -294,6 +340,12 @@ if [ $ssl_host ]; then
 		"%t %h %{SSL_PROTOCOL}x %{SSL_CIPHER}x \"%r\" %b"
 EOF
 
+	if [ ! "$no_suexec" ]; then
+		cat >> $conffile <<EOF
+	SuexecUserGroup $user $group
+EOF
+	fi
+
 	if [ ! "$no_awstats" ]; then
 		cat >> $conffile << EOF
 	#### START AWSTATS ####
@@ -308,7 +360,8 @@ EOF
 	</Directory>
 	#### END AWSTATS ####
 EOF
-    fi
+
+	fi
 
 	if [ ! "$no_suphp" ]; then
 		cat >> $conffile << EOF
@@ -323,6 +376,7 @@ EOF
 	</Directory>
 	#### END SUPHP ####
 EOF
+
 	fi	
     echo "</VirtualHost>" >> $conffile
 fi
